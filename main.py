@@ -15,12 +15,15 @@ services_registry: Dict[str, Dict[str, Any]] = {}
 registration_logs: List[Dict[str, Any]] = []
 MAX_LOGS = 100
 
+class EndpointSchema(BaseModel):
+    path: str
+    description: str
+    input_schema: Dict[str, str]
+
 class ServiceRegistration(BaseModel):
     name: str
-    url: str
-    endpoints: List[str]
-    health_check: Optional[str] = None
-    description: Optional[str] = None
+    internal_url: str
+    endpoints: List[EndpointSchema]
 
 def log_message(level: str, message: str):
     """Custom logging function that stores logs in memory and logs to console"""
@@ -53,10 +56,8 @@ async def register_service(service: ServiceRegistration):
         # Store service info with timestamp
         service_data = {
             "name": service.name,
-            "url": service.url,
-            "endpoints": service.endpoints,
-            "health_check": service.health_check,
-            "description": service.description,
+            "internal_url": service.internal_url,
+            "endpoints": [endpoint.dict() for endpoint in service.endpoints],
             "registered_at": datetime.now().isoformat(),
             "last_seen": datetime.now().isoformat()
         }

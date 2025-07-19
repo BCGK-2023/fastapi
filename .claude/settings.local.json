@@ -4,7 +4,8 @@
       "WebFetch(domain:docs.railway.com)",
       "WebFetch(domain:www.postman.com)",
       "WebFetch(domain:railway.com)",
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "WebFetch(domain:fastapi-open-source-apis.up.railway.app)"
     ],
     "deny": []
   }
