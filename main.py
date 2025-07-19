@@ -1,5 +1,7 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from pydantic import BaseModel
+import httpx
+import json
 import os
 import logging
 from datetime import datetime
@@ -49,6 +51,58 @@ def log_message(level: str, message: str):
     elif level == "DEBUG":
         logger.debug(message)
 
+def truncate_body(body: Any, max_length: int = 200) -> str:
+    """Truncate large request/response bodies for logging"""
+    try:
+        if isinstance(body, dict):
+            body_str = json.dumps(body)
+        else:
+            body_str = str(body)
+        
+        if len(body_str) > max_length:
+            return body_str[:max_length] + "... [truncated]"
+        return body_str
+    except:
+        return "[unable to serialize body]"
+
+async def create_dynamic_route(service_name: str, endpoint_path: str, internal_url: str, input_schema: Dict[str, str]):
+    """Create a dynamic route for a registered service endpoint"""
+    route_path = f"/{service_name}{endpoint_path}"
+    
+    async def route_handler(request: Request):
+        try:
+            # Get request body
+            body = await request.json() if await request.body() else {}
+            
+            # Log the incoming request
+            log_message("INFO", f"Route called: POST {route_path} with body: {truncate_body(body)}")
+            log_message("INFO", f"Forwarding to: {internal_url}{endpoint_path}")
+            
+            # Forward request to internal service
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.post(
+                    f"{internal_url}{endpoint_path}",
+                    json=body,
+                    headers={"Content-Type": "application/json"}
+                )
+                
+                # Log the response
+                log_message("INFO", f"Response received: {response.status_code} from {internal_url}{endpoint_path}")
+                
+                # Return the response
+                return response.json() if response.headers.get("content-type", "").startswith("application/json") else response.text
+                
+        except Exception as e:
+            log_message("ERROR", f"Error forwarding request to {internal_url}{endpoint_path}: {str(e)}")
+            return {"error": "Internal service error", "details": str(e)}
+    
+    # Add the route to FastAPI
+    app.post(route_path)(route_handler)
+    
+    # Log route creation
+    log_message("INFO", f"Created route: POST {route_path} -> {internal_url}{endpoint_path}")
+    log_message("INFO", f"Route expects input: {input_schema}")
+
 @app.post("/register")
 async def register_service(service: ServiceRegistration):
     """Register a service with the hub"""
@@ -65,10 +119,20 @@ async def register_service(service: ServiceRegistration):
         services_registry[service.name] = service_data
         log_message("INFO", f"Service '{service.name}' registered successfully")
         
+        # Create dynamic routes for each endpoint
+        for endpoint in service.endpoints:
+            await create_dynamic_route(
+                service.name, 
+                endpoint.path, 
+                service.internal_url,
+                endpoint.input_schema
+            )
+        
         return {
             "status": "success",
             "message": f"Service '{service.name}' registered",
-            "service": service_data
+            "service": service_data,
+            "routes_created": len(service.endpoints)
         }
         
     except Exception as e:
