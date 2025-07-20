@@ -36,11 +36,18 @@ const registerWithHub = async () => {
         endpoints: [
           {
             path: "/process",
+            method: "POST",
             description: "Process data",
             input_schema: {
               text: "string",
               options: "object"
             }
+          },
+          {
+            path: "/health",
+            method: "GET",
+            description: "Health check",
+            input_schema: {}
           }
         ]
       })
@@ -64,9 +71,10 @@ registerWithHub();
 ### 2. Design Your Endpoints
 
 Your endpoints should:
-- Accept POST requests with JSON bodies
+- Specify HTTP method in registration (`method: "GET"`, `"POST"`, etc.)
 - Return JSON responses
 - Handle errors gracefully
+- Use appropriate methods: GET for data retrieval, POST for data processing
 
 ```javascript
 app.post("/process", async (req, res) => {
@@ -196,10 +204,12 @@ console.log(`Error processing request: ${error.message}`);
 ## Troubleshooting
 
 ### Registration Not Working
-1. **Check hub URL** - verify `fastapi-556cf929.railway.internal` is reachable
-2. **Verify JSON format** - ensure registration payload matches expected schema
-3. **Check hub logs** - visit hub dashboard to see registration attempts
-4. **Network connectivity** - ensure your service can reach internal Railway network
+1. **Try external URL first** - if internal fails, use `https://fastapi-open-source-apis.up.railway.app/register`
+2. **Add retry logic** - Railway internal networking may need time to establish (try 3-5 times with 2-second delays)
+3. **Check hub URL** - verify `fastapi-556cf929.railway.internal` is reachable
+4. **Verify JSON format** - ensure registration payload matches expected schema
+5. **Check hub logs** - visit hub dashboard to see registration attempts
+6. **Network connectivity** - ensure your service can reach internal Railway network
 
 ### Service Not Receiving Requests
 1. **Verify registration** - check hub dashboard shows your service
@@ -224,7 +234,7 @@ console.log(`Error processing request: ${error.message}`);
 # Test registration endpoint directly
 curl -X POST "http://fastapi-556cf929.railway.internal/register" \
   -H "Content-Type: application/json" \
-  -d '{"name":"test","internal_url":"http://test.railway.internal:3000","endpoints":[{"path":"/test","description":"Test","input_schema":{"data":"string"}}]}'
+  -d '{"name":"test","internal_url":"http://test.railway.internal:3000","endpoints":[{"path":"/test","method":"POST","description":"Test","input_schema":{"data":"string"}}]}'
 
 # Test your service directly
 curl -X POST "http://your-service.railway.internal:3000/endpoint" \
