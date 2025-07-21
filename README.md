@@ -11,7 +11,9 @@ When microservices register themselves with the hub, it automatically creates pu
 - **Automatic routing** - services register once, routes appear immediately  
 - **Zero configuration** - no manual setup or route definitions
 - **Full request logging** - see exactly what's happening
-- **JSON-first** - designed for POST requests with JSON payloads
+- **Multiple HTTP methods** - supports GET, POST, PUT, DELETE, PATCH
+- **Per-endpoint timeouts** - services can specify custom timeout values
+- **Heartbeat monitoring** - automatic cleanup of stale services
 
 ## Why use it?
 
@@ -54,6 +56,8 @@ curl -X POST "your-hub-url.com/register" \
     "endpoints": [
       {
         "path": "/process",
+        "method": "POST",
+        "timeout": 30,
         "description": "Process some data",
         "input_schema": {
           "text": "string",
@@ -161,6 +165,8 @@ await fetch("http://fastapi-hub.railway.internal/register", {
     endpoints: [
       {
         path: "/analyze",
+        method: "POST",
+        timeout: 45,  // Analysis might take longer
         description: "Analyze text data", 
         input_schema: {
           text: "string",
@@ -170,6 +176,8 @@ await fetch("http://fastapi-hub.railway.internal/register", {
       },
       {
         path: "/summarize",
+        method: "POST", 
+        timeout: 60,  // Summarization can be slow
         description: "Summarize long text",
         input_schema: {
           text: "string",
@@ -186,6 +194,8 @@ await fetch("http://fastapi-hub.railway.internal/register", {
 - **internal_url**: Your service's Railway internal URL
 - **endpoints**: Array of endpoints your service provides
   - **path**: Endpoint path (e.g., "/analyze")
+  - **method**: HTTP method (GET, POST, PUT, DELETE, PATCH) - defaults to POST
+  - **timeout**: Request timeout in seconds - defaults to 30
   - **description**: Human-readable description
   - **input_schema**: Expected JSON parameters and their types
 
@@ -212,6 +222,8 @@ await fetch("http://fastapi-hub.railway.internal/register", {
   "endpoints": [
     {
       "path": "/resize",
+      "method": "POST",
+      "timeout": 120,
       "description": "Resize images",
       "input_schema": {
         "image": "base64 string",
@@ -238,6 +250,8 @@ curl -X POST "hub.com/image-processor/resize" \
   "endpoints": [
     {
       "path": "/sentiment",
+      "method": "POST",
+      "timeout": 30,
       "description": "Analyze text sentiment",
       "input_schema": {
         "text": "string",
@@ -267,6 +281,8 @@ Register a new service with the hub.
   "endpoints": [
     {
       "path": "string",
+      "method": "string",  // Optional, defaults to "POST"
+      "timeout": 30,       // Optional, defaults to 30 seconds
       "description": "string",
       "input_schema": {
         "param_name": "type"

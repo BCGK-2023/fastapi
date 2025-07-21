@@ -23,6 +23,7 @@ class EndpointSchema(BaseModel):
     method: str = "POST"  # Default to POST for backward compatibility
     description: str
     input_schema: Dict[str, str]
+    timeout: int = 30  # Default timeout in seconds
 
 class ServiceRegistration(BaseModel):
     name: str
@@ -132,7 +133,7 @@ def check_and_update_service_statuses():
         "removed": removed_services
     }
 
-async def create_dynamic_route(service_name: str, endpoint_path: str, internal_url: str, input_schema: Dict[str, str], method: str = "POST"):
+async def create_dynamic_route(service_name: str, endpoint_path: str, internal_url: str, input_schema: Dict[str, str], method: str = "POST", timeout: int = 30):
     """Create a dynamic route for a registered service endpoint"""
     route_path = f"/{service_name}{endpoint_path}"
     
@@ -148,7 +149,7 @@ async def create_dynamic_route(service_name: str, endpoint_path: str, internal_u
             log_message("INFO", f"Forwarding to: {internal_url}{endpoint_path}")
             
             # Forward request to internal service
-            async with httpx.AsyncClient(timeout=30) as client:
+            async with httpx.AsyncClient(timeout=timeout) as client:
                 request_kwargs = {
                     "headers": {"Content-Type": "application/json"} if body else {}
                 }
@@ -192,7 +193,7 @@ async def create_dynamic_route(service_name: str, endpoint_path: str, internal_u
         return
     
     # Log route creation
-    log_message("INFO", f"Created route: {method.upper()} {route_path} -> {internal_url}{endpoint_path}")
+    log_message("INFO", f"Created route: {method.upper()} {route_path} -> {internal_url}{endpoint_path} (timeout: {timeout}s)")
     log_message("INFO", f"Route expects input: {input_schema}")
 
 @app.post("/register")
@@ -240,7 +241,8 @@ async def register_service(service: ServiceRegistration):
                     endpoint.path, 
                     service.internal_url,
                     endpoint.input_schema,
-                    endpoint.method
+                    endpoint.method,
+                    endpoint.timeout
                 )
         else:
             # For re-registration, just update last_seen (no logging or route creation)

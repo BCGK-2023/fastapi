@@ -38,6 +38,7 @@ const registerWithHub = async () => {
             path: "/process",
             method: "POST",
             description: "Process data",
+            timeout: 120,  // Long-running process needs 2 minutes
             input_schema: {
               text: "string",
               options: "object"
@@ -45,8 +46,9 @@ const registerWithHub = async () => {
           },
           {
             path: "/health",
-            method: "GET",
+            method: "GET", 
             description: "Health check",
+            timeout: 5,  // Quick health check
             input_schema: {}
           }
         ]
@@ -72,6 +74,7 @@ registerWithHub();
 
 Your endpoints should:
 - Specify HTTP method in registration (`method: "GET"`, `"POST"`, etc.)
+- Set appropriate timeout in seconds (`timeout: 30` for default, higher for long-running processes)
 - Return JSON responses
 - Handle errors gracefully
 - Use appropriate methods: GET for data retrieval, POST for data processing
@@ -246,7 +249,7 @@ internal_url = f"http://{service_name_clean}.railway.internal:{port}"
 # Test registration endpoint directly
 curl -X POST "http://fastapi-556cf929.railway.internal/register" \
   -H "Content-Type: application/json" \
-  -d '{"name":"test","internal_url":"http://test.railway.internal:3000","endpoints":[{"path":"/test","method":"POST","description":"Test","input_schema":{"data":"string"}}]}'
+  -d '{"name":"test","internal_url":"http://test.railway.internal:3000","endpoints":[{"path":"/test","method":"POST","timeout":30,"description":"Test","input_schema":{"data":"string"}}]}'
 
 # Test your service directly
 curl -X POST "http://your-service.railway.internal:3000/endpoint" \
@@ -305,12 +308,14 @@ def register_with_hub():
                 "path": "/api",
                 "method": "POST",
                 "description": "Your API endpoint",
+                "timeout": 60,  // 1 minute for API processing
                 "input_schema": {"data": "string"}
             },
             {
                 "path": "/health",
                 "method": "GET", 
                 "description": "Health check",
+                "timeout": 5,   // Quick health check
                 "input_schema": {}
             }
         ]
