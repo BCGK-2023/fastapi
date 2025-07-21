@@ -247,4 +247,128 @@ curl -X POST "https://fastapi-open-source-apis.up.railway.app/your-service/endpo
   -d '{"test":"data"}'
 ```
 
+## Heartbeat System
+
+The hub uses a heartbeat system to track service health and automatically clean up stale services. Services must re-register every 5 minutes on UK time boundaries (:00, :05, :10, :15, etc.) to maintain their active status.
+
+### Heartbeat Schedule
+- **Timing**: Every 5 minutes at UK time boundaries (7:00, 7:05, 7:10, 7:15, etc.)
+- **Stale threshold**: 15 minutes (3 missed heartbeats)
+- **Removal threshold**: 1 hour after going stale
+
+### Python Heartbeat Implementation
+
+```python
+import time
+import requests
+from datetime import datetime
+import pytz
+import threading
+
+def calculate_next_heartbeat():
+    """Calculate next UK time ending in :00, :05, :10, :15, etc."""
+    uk_tz = pytz.timezone('Europe/London')
+    now_uk = datetime.now(uk_tz)
+    
+    # Round up to next 5-minute boundary
+    minutes = now_uk.minute
+    next_boundary = ((minutes // 5) + 1) * 5
+    
+    if next_boundary >= 60:
+        # Next hour
+        next_time = now_uk.replace(hour=now_uk.hour + 1, minute=0, second=0, microsecond=0)
+    else:
+        # Same hour, next boundary
+        next_time = now_uk.replace(minute=next_boundary, second=0, microsecond=0)
+    
+    return next_time
+
+def register_with_hub():
+    """Register/heartbeat with the hub"""
+    registration_data = {
+        "name": "your-service-name",
+        "internal_url": "http://your-service.railway.internal:8080",
+        "endpoints": [
+            {
+                "path": "/api",
+                "method": "POST",
+                "description": "Your API endpoint",
+                "input_schema": {"data": "string"}
+            },
+            {
+                "path": "/health",
+                "method": "GET", 
+                "description": "Health check",
+                "input_schema": {}
+            }
+        ]
+    }
+    
+    try:
+        response = requests.post(
+            "https://fastapi-open-source-apis.up.railway.app/register",
+            json=registration_data,
+            timeout=10
+        )
+        
+        if response.ok:
+            print(f"✅ Heartbeat sent successfully at {datetime.now()}")
+        else:
+            print(f"❌ Heartbeat failed: {response.status_code} - {response.text}")
+            
+    except Exception as e:
+        print(f"❌ Heartbeat error: {e}")
+
+def heartbeat_worker():
+    """Background worker that sends heartbeats on UK time schedule"""
+    while True:
+        try:
+            next_heartbeat = calculate_next_heartbeat()
+            now_uk = datetime.now(pytz.timezone('Europe/London'))
+            
+            # Calculate sleep time until next heartbeat
+            sleep_seconds = (next_heartbeat - now_uk).total_seconds()
+            
+            print(f"⏰ Next heartbeat scheduled for {next_heartbeat.strftime('%H:%M')} UK time")
+            print(f"   Sleeping for {sleep_seconds:.0f} seconds...")
+            
+            time.sleep(sleep_seconds)
+            
+            # Send heartbeat
+            register_with_hub()
+            
+        except Exception as e:
+            print(f"❌ Heartbeat worker error: {e}")
+            time.sleep(60)  # Wait 1 minute before retrying
+
+# Start heartbeat system
+def start_heartbeat_system():
+    """Start the heartbeat system in a background thread"""
+    # Send initial registration immediately
+    print("🚀 Sending initial registration...")
+    register_with_hub()
+    
+    # Start heartbeat worker in background thread
+    heartbeat_thread = threading.Thread(target=heartbeat_worker, daemon=True)
+    heartbeat_thread.start()
+    print("💓 Heartbeat system started")
+
+# Usage in your main application
+if __name__ == "__main__":
+    # Start your service
+    start_heartbeat_system()
+    
+    # Your main application code here
+    # The heartbeat runs in the background
+```
+
+### Service Status Tracking
+
+Services have three states:
+- **Active**: Heartbeat received within 15 minutes
+- **Stale**: No heartbeat for 15+ minutes (marked but still registered)  
+- **Removed**: No heartbeat for 1+ hours (completely removed from hub)
+
+The hub dashboard shows service status and logs when services go stale or get removed.
+
 Remember: Your service should work independently of the hub. Registration is just for public exposure - if the hub is down, your service should continue operating normally.

@@ -4,8 +4,9 @@ import httpx
 import json
 import os
 import logging
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Any, Optional
+import pytz
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -65,6 +66,71 @@ def truncate_body(body: Any, max_length: int = 200) -> str:
         return body_str
     except:
         return "[unable to serialize body]"
+
+def check_and_update_service_statuses():
+    """Check all services and update their status based on last_seen"""
+    uk_tz = pytz.timezone('Europe/London')
+    now_uk = datetime.now(uk_tz)
+    
+    stale_threshold = timedelta(minutes=15)  # 3 missed heartbeats
+    remove_threshold = timedelta(hours=1)    # Remove after 1 hour
+    
+    staled_services = []
+    removed_services = []
+    
+    services_to_remove = []
+    
+    for service_name, service_data in services_registry.items():
+        last_seen_str = service_data.get('last_seen')
+        if not last_seen_str:
+            continue
+            
+        try:
+            # Parse the last_seen timestamp (assuming it's in ISO format)
+            last_seen = datetime.fromisoformat(last_seen_str.replace('Z', '+00:00'))
+            if last_seen.tzinfo is None:
+                last_seen = last_seen.replace(tzinfo=timezone.utc)
+            last_seen_uk = last_seen.astimezone(uk_tz)
+            
+            time_diff = now_uk - last_seen_uk
+            
+            # Check if service should be removed (1 hour)
+            if time_diff > remove_threshold:
+                services_to_remove.append(service_name)
+                removed_services.append(service_name)
+                continue
+            
+            # Check if service should be marked as stale (15 minutes)
+            if time_diff > stale_threshold:
+                if service_data.get('status') != 'stale':
+                    service_data['status'] = 'stale'
+                    service_data['marked_stale_at'] = now_uk.isoformat()
+                    staled_services.append(service_name)
+            else:
+                # Service is active, ensure it's not marked as stale
+                if service_data.get('status') == 'stale':
+                    service_data['status'] = 'active'
+                    if 'marked_stale_at' in service_data:
+                        del service_data['marked_stale_at']
+                        
+        except Exception as e:
+            log_message("ERROR", f"Error processing service {service_name} timestamps: {e}")
+    
+    # Remove services that exceeded the remove threshold
+    for service_name in services_to_remove:
+        del services_registry[service_name]
+    
+    # Log the changes
+    if staled_services:
+        log_message("WARNING", f"Marked services as stale (missed heartbeats): {', '.join(staled_services)}")
+    
+    if removed_services:
+        log_message("INFO", f"Removed services (1+ hour since last heartbeat): {', '.join(removed_services)}")
+    
+    return {
+        "staled": staled_services,
+        "removed": removed_services
+    }
 
 async def create_dynamic_route(service_name: str, endpoint_path: str, internal_url: str, input_schema: Dict[str, str], method: str = "POST"):
     """Create a dynamic route for a registered service endpoint"""
@@ -133,33 +199,55 @@ async def create_dynamic_route(service_name: str, endpoint_path: str, internal_u
 async def register_service(service: ServiceRegistration):
     """Register a service with the hub"""
     try:
+        # Check and update all service statuses before processing this registration
+        status_changes = check_and_update_service_statuses()
+        
+        uk_tz = pytz.timezone('Europe/London')
+        now_uk = datetime.now(uk_tz)
+        
+        # Check if this is a re-registration
+        is_reregistration = service.name in services_registry
+        
         # Store service info with timestamp
         service_data = {
             "name": service.name,
             "internal_url": service.internal_url,
             "endpoints": [endpoint.dict() for endpoint in service.endpoints],
-            "registered_at": datetime.now().isoformat(),
-            "last_seen": datetime.now().isoformat()
+            "last_seen": now_uk.isoformat(),
+            "status": "active"
         }
         
-        services_registry[service.name] = service_data
-        log_message("INFO", f"Service '{service.name}' registered successfully")
+        # Keep original registration time if re-registering
+        if is_reregistration:
+            service_data["registered_at"] = services_registry[service.name].get("registered_at", now_uk.isoformat())
+        else:
+            service_data["registered_at"] = now_uk.isoformat()
         
-        # Create dynamic routes for each endpoint
-        for endpoint in service.endpoints:
-            await create_dynamic_route(
-                service.name, 
-                endpoint.path, 
-                service.internal_url,
-                endpoint.input_schema,
-                endpoint.method
-            )
+        services_registry[service.name] = service_data
+        
+        # Only log and create routes for new registrations
+        if not is_reregistration:
+            log_message("INFO", f"Service '{service.name}' registered successfully")
+            
+            # Create dynamic routes for each endpoint
+            for endpoint in service.endpoints:
+                await create_dynamic_route(
+                    service.name, 
+                    endpoint.path, 
+                    service.internal_url,
+                    endpoint.input_schema,
+                    endpoint.method
+                )
+        else:
+            # For re-registration, just update last_seen (no logging or route creation)
+            pass
         
         return {
             "status": "success",
-            "message": f"Service '{service.name}' registered",
+            "message": f"Service '{service.name}' {'re-registered' if is_reregistration else 'registered'}",
             "service": service_data,
-            "routes_created": len(service.endpoints)
+            "routes_created": len(service.endpoints) if not is_reregistration else 0,
+            "status_changes": status_changes
         }
         
     except Exception as e:
@@ -244,14 +332,32 @@ async def test_network():
 @app.get("/")
 async def dashboard():
     """FastAPI-HUB Dashboard - shows registered services and logs"""
+    # Update service statuses when dashboard is accessed
+    status_changes = check_and_update_service_statuses()
+    
+    # Categorize services by status
+    active_services = {name: data for name, data in services_registry.items() if data.get('status') != 'stale'}
+    stale_services = {name: data for name, data in services_registry.items() if data.get('status') == 'stale'}
+    
     return {
         "hub_status": "running",
-        "mode": "service_registration",
-        "services": services_registry,
-        "service_count": len(services_registry),
+        "mode": "service_registration_with_heartbeat",
+        "services": {
+            "active": active_services,
+            "stale": stale_services,
+            "total_count": len(services_registry),
+            "active_count": len(active_services),
+            "stale_count": len(stale_services)
+        },
+        "heartbeat_info": {
+            "interval": "Every 5 minutes (UK time: :00, :05, :10, :15, etc.)",
+            "stale_after": "15 minutes (3 missed heartbeats)",
+            "removed_after": "1 hour"
+        },
         "logs": registration_logs[-20:],  # Show last 20 logs
+        "status_changes": status_changes,
         "endpoints": {
-            "register": "POST /register - Register a service",
+            "register": "POST /register - Register a service (also used for heartbeat)",
             "dashboard": "GET / - View this dashboard",
             "network_test": "GET /test/network - Test Railway networking"
         }
