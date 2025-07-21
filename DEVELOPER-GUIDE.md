@@ -222,11 +222,23 @@ console.log(`Error processing request: ${error.message}`);
 // Wrong internal URL format
 "internal_url": "your-service.railway.internal"  // Missing http://
 
+// Invalid hostname with spaces (common Railway issue)
+"internal_url": "http://My Service.railway.internal:8080"  // Should be "my-service"
+
 // Incorrect endpoint paths  
 "path": "process"  // Missing leading slash, should be "/process"
 
 // Invalid schema types
 "input_schema": { "count": "int" }  // Should be "integer"
+```
+
+**Important**: Railway service names with spaces (like "My Service") create invalid hostnames. Always sanitize service names for internal URLs:
+```python
+import os
+service_name = os.getenv('RAILWAY_SERVICE_NAME', 'my-service')
+# Sanitize for hostname usage
+service_name_clean = service_name.lower().replace(' ', '-')
+internal_url = f"http://{service_name_clean}.railway.internal:{port}"
 ```
 
 ### Testing Your Integration

@@ -208,6 +208,10 @@ async def register_service(service: ServiceRegistration):
         # Check if this is a re-registration
         is_reregistration = service.name in services_registry
         
+        # Validate internal_url for common issues
+        if ' ' in service.internal_url:
+            log_message("WARNING", f"Invalid hostname in internal_url: '{service.internal_url}' - contains spaces. This will cause connection failures.")
+        
         # Store service info with timestamp
         service_data = {
             "name": service.name,
