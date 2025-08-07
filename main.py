@@ -7,6 +7,9 @@ import logging
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Any, Optional
 import pytz
+import asyncio
+import random
+from enum import Enum
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -18,12 +21,53 @@ services_registry: Dict[str, Dict[str, Any]] = {}
 registration_logs: List[Dict[str, Any]] = []
 MAX_LOGS = 100
 
+# Circuit breaker states and registry
+class CircuitState(Enum):
+    CLOSED = "closed"      # Normal operation
+    OPEN = "open"         # Blocking requests
+    HALF_OPEN = "half_open"  # Testing if service recovered
+
+class CircuitBreaker:
+    def __init__(self, failure_threshold: int = 5, timeout: int = 60):
+        self.failure_threshold = failure_threshold
+        self.timeout = timeout  # seconds to wait before trying again
+        self.failure_count = 0
+        self.last_failure_time = None
+        self.state = CircuitState.CLOSED
+    
+    def can_execute(self) -> bool:
+        if self.state == CircuitState.CLOSED:
+            return True
+        elif self.state == CircuitState.OPEN:
+            if self.last_failure_time and datetime.now() - self.last_failure_time > timedelta(seconds=self.timeout):
+                self.state = CircuitState.HALF_OPEN
+                return True
+            return False
+        else:  # HALF_OPEN
+            return True
+    
+    def record_success(self):
+        self.failure_count = 0
+        self.state = CircuitState.CLOSED
+    
+    def record_failure(self):
+        self.failure_count += 1
+        self.last_failure_time = datetime.now()
+        
+        if self.failure_count >= self.failure_threshold:
+            self.state = CircuitState.OPEN
+
+circuit_breakers: Dict[str, CircuitBreaker] = {}
+
 class EndpointSchema(BaseModel):
     path: str
     method: str = "POST"  # Default to POST for backward compatibility
     description: str
     input_schema: Dict[str, str]
     timeout: int = 30  # Default timeout in seconds
+    connect_timeout: int = 10  # Connection timeout
+    read_timeout: int = 300    # Read timeout for long operations
+    max_retries: int = 3       # Number of retry attempts
 
 class ServiceRegistration(BaseModel):
     name: str
@@ -67,6 +111,65 @@ def truncate_body(body: Any, max_length: int = 200) -> str:
         return body_str
     except:
         return "[unable to serialize body]"
+
+async def health_check_service(internal_url: str) -> bool:
+    """Check if service is healthy before forwarding requests"""
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            # Try health endpoint first, fallback to base URL
+            for path in ["/health", "/", ""]:
+                try:
+                    response = await client.get(f"{internal_url}{path}")
+                    if response.status_code < 500:  # 2xx, 3xx, 4xx are considered "reachable"
+                        return True
+                except:
+                    continue
+        return False
+    except:
+        return False
+
+async def forward_with_retry(internal_url: str, endpoint_path: str, method: str, body: dict, 
+                           connect_timeout: int, read_timeout: int, max_retries: int = 3):
+    """Forward request with exponential backoff retry"""
+    
+    timeout_config = httpx.Timeout(
+        connect=connect_timeout,
+        read=read_timeout,
+        write=30.0,
+        pool=10.0
+    )
+    
+    for attempt in range(max_retries + 1):  # 0, 1, 2, 3
+        try:
+            async with httpx.AsyncClient(timeout=timeout_config) as client:
+                request_kwargs = {"headers": {"Content-Type": "application/json"} if body else {}}
+                
+                if method.upper() == "GET":
+                    response = await client.get(f"{internal_url}{endpoint_path}", **request_kwargs)
+                elif method.upper() == "POST":
+                    response = await client.post(f"{internal_url}{endpoint_path}", json=body, **request_kwargs)
+                elif method.upper() == "PUT":
+                    response = await client.put(f"{internal_url}{endpoint_path}", json=body, **request_kwargs)
+                elif method.upper() == "DELETE":
+                    response = await client.delete(f"{internal_url}{endpoint_path}", **request_kwargs)
+                elif method.upper() == "PATCH":
+                    response = await client.patch(f"{internal_url}{endpoint_path}", json=body, **request_kwargs)
+                else:
+                    raise ValueError(f"Unsupported HTTP method: {method}")
+                
+                response.raise_for_status()  # Raise for 4xx/5xx
+                log_message("INFO", f"Response received: {response.status_code} from {internal_url}{endpoint_path}")
+                return response.json() if response.headers.get("content-type", "").startswith("application/json") else response.text
+                
+        except (httpx.TimeoutException, httpx.ConnectError, httpx.HTTPStatusError, httpx.NetworkError) as e:
+            if attempt == max_retries:
+                log_message("ERROR", f"All {max_retries + 1} attempts failed for {internal_url}{endpoint_path}: {str(e)}")
+                raise
+            
+            # Exponential backoff: 1s, 2s, 4s + jitter
+            delay = (2 ** attempt) + random.uniform(0, 1)
+            log_message("WARNING", f"Attempt {attempt + 1} failed for {internal_url}{endpoint_path}, retrying in {delay:.1f}s: {str(e)}")
+            await asyncio.sleep(delay)
 
 def check_and_update_service_statuses():
     """Check all services and update their status based on last_seen"""
@@ -133,7 +236,9 @@ def check_and_update_service_statuses():
         "removed": removed_services
     }
 
-async def create_dynamic_route(service_name: str, endpoint_path: str, internal_url: str, input_schema: Dict[str, str], method: str = "POST", timeout: int = 30):
+async def create_dynamic_route(service_name: str, endpoint_path: str, internal_url: str, input_schema: Dict[str, str], 
+                              method: str = "POST", timeout: int = 30, connect_timeout: int = 10, 
+                              read_timeout: int = 300, max_retries: int = 3):
     """Create a dynamic route for a registered service endpoint"""
     route_path = f"/{service_name}{endpoint_path}"
     
@@ -148,30 +253,39 @@ async def create_dynamic_route(service_name: str, endpoint_path: str, internal_u
             log_message("INFO", f"Route called: {method.upper()} {route_path} with body: {truncate_body(body)}")
             log_message("INFO", f"Forwarding to: {internal_url}{endpoint_path}")
             
-            # Forward request to internal service
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                request_kwargs = {
-                    "headers": {"Content-Type": "application/json"} if body else {}
+            # Circuit breaker check
+            service_key = f"{service_name}{endpoint_path}"
+            if service_key not in circuit_breakers:
+                circuit_breakers[service_key] = CircuitBreaker()
+            
+            breaker = circuit_breakers[service_key]
+            
+            if not breaker.can_execute():
+                log_message("WARNING", f"Circuit breaker OPEN for {service_key}")
+                return {
+                    "error": "Service temporarily unavailable", 
+                    "circuit_breaker": "open",
+                    "retry_after": breaker.timeout
                 }
+            
+            # Health check before forwarding
+            if not await health_check_service(internal_url):
+                log_message("WARNING", f"Health check failed for {internal_url}")
+                breaker.record_failure()
+                return {"error": "Service health check failed", "service": service_name}
+            
+            # Forward request with retry logic
+            try:
+                response = await forward_with_retry(
+                    internal_url, endpoint_path, method, body, 
+                    connect_timeout, read_timeout, max_retries
+                )
+                breaker.record_success()
+                return response
                 
-                if method.upper() == "GET":
-                    response = await client.get(f"{internal_url}{endpoint_path}", **request_kwargs)
-                elif method.upper() == "POST":
-                    response = await client.post(f"{internal_url}{endpoint_path}", json=body, **request_kwargs)
-                elif method.upper() == "PUT":
-                    response = await client.put(f"{internal_url}{endpoint_path}", json=body, **request_kwargs)
-                elif method.upper() == "DELETE":
-                    response = await client.delete(f"{internal_url}{endpoint_path}", **request_kwargs)
-                elif method.upper() == "PATCH":
-                    response = await client.patch(f"{internal_url}{endpoint_path}", json=body, **request_kwargs)
-                else:
-                    raise ValueError(f"Unsupported HTTP method: {method}")
-                
-                # Log the response
-                log_message("INFO", f"Response received: {response.status_code} from {internal_url}{endpoint_path}")
-                
-                # Return the response
-                return response.json() if response.headers.get("content-type", "").startswith("application/json") else response.text
+            except Exception as e:
+                breaker.record_failure()
+                raise
                 
         except Exception as e:
             log_message("ERROR", f"Error forwarding request to {internal_url}{endpoint_path}: {str(e)}")
@@ -193,7 +307,7 @@ async def create_dynamic_route(service_name: str, endpoint_path: str, internal_u
         return
     
     # Log route creation
-    log_message("INFO", f"Created route: {method.upper()} {route_path} -> {internal_url}{endpoint_path} (timeout: {timeout}s)")
+    log_message("INFO", f"Created route: {method.upper()} {route_path} -> {internal_url}{endpoint_path} (connect: {connect_timeout}s, read: {read_timeout}s, retries: {max_retries})")
     log_message("INFO", f"Route expects input: {input_schema}")
 
 @app.post("/register")
@@ -242,7 +356,10 @@ async def register_service(service: ServiceRegistration):
                     service.internal_url,
                     endpoint.input_schema,
                     endpoint.method,
-                    endpoint.timeout
+                    endpoint.timeout,
+                    endpoint.connect_timeout,
+                    endpoint.read_timeout,
+                    endpoint.max_retries
                 )
         else:
             # For re-registration, just update last_seen (no logging or route creation)
@@ -263,10 +380,26 @@ async def register_service(service: ServiceRegistration):
             "message": str(e)
         }
 
+async def periodic_health_checks():
+    """Background task to check all services health"""
+    while True:
+        try:
+            for service_name, service_data in services_registry.items():
+                if service_data.get('status') == 'active':
+                    is_healthy = await health_check_service(service_data['internal_url'])
+                    if not is_healthy:
+                        log_message("WARNING", f"Service {service_name} failed periodic health check")
+        except Exception as e:
+            log_message("ERROR", f"Error in periodic health checks: {e}")
+        
+        await asyncio.sleep(60)  # Check every minute
+
 @app.on_event("startup")
 async def startup_event():
     """Initialize the hub"""
     log_message("INFO", "FastAPI-HUB starting up - service registration mode")
+    # Start background health checks
+    asyncio.create_task(periodic_health_checks())
 
 @app.get("/test/network")
 async def test_network():
